@@ -249,6 +249,56 @@ test("重新授权产生新文档令牌：旧页迟到保存被拒，不能覆�
   assert.equal(list.revisions.length, 2);
 });
 
+test("过期授权不能读取修订或恢复；新授权后的原单修订流程仍可用", async () => {
+  const h = await dispatch(
+    { type: "HELLO" },
+    pageSender({ documentId: "expiry-doc" }),
+  );
+  const saved = await dispatch(
+    { type: "SAVE_DRAFT", token: h.token, envelope: envelope() },
+    pageSender({ documentId: "expiry-doc" }),
+  );
+  assert.equal(saved.ok, true);
+  const list = await dispatch(
+    { type: "LIST_DRAFTS", token: h.token },
+    pageSender({ documentId: "expiry-doc" }),
+  );
+  const id = list.revisions[0].id;
+
+  const db = await DB.openDb();
+  const tx = db.transaction(["tokens"], "readwrite");
+  const store = tx.objectStore("tokens");
+  const rec = await new Promise((resolve) => {
+    const req = store.get(h.token);
+    req.onsuccess = () => resolve(req.result);
+  });
+  rec.expiresAt = 1;
+  rec.status = "expired";
+  store.put(rec);
+  await new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+
+  const staleGet = await dispatch(
+    { type: "GET_REVISION", token: h.token, id },
+    pageSender({ documentId: "expiry-doc" }),
+  );
+  assert.equal(staleGet.ok, false);
+  assert.equal(staleGet.error, "expired-token");
+
+  const reauthorized = await dispatch(
+    { type: "HELLO" },
+    pageSender({ documentId: "expiry-doc" }),
+  );
+  const freshGet = await dispatch(
+    { type: "GET_REVISION", token: reauthorized.token, id },
+    pageSender({ documentId: "expiry-doc" }),
+  );
+  assert.equal(freshGet.ok, true);
+  assert.equal(freshGet.revision.formId, "checkout");
+});
+
 test("sender.documentId 变化（整页导航后新文档）时旧令牌组合校验失败", async () => {
   const h = await dispatch(
     { type: "HELLO" },

@@ -23,7 +23,7 @@ tools/
 ├── serve.js               零依赖静态服务器（http://127.0.0.1:8765）
 ├── check.js               静态安全/语法检查
 └── make-icons.js          生成图标
-test/                      Node 单元 + SW 消息层集成测试（32 项）
+test/                      Node 单元 + SW 消息层集成测试（39 项）
 ```
 
 ## 安装与运行
@@ -61,7 +61,8 @@ npm run serve     # 启动测试站点 http://127.0.0.1:8765/index.html
 | IndexedDB 事务维护修订与令牌，SW 唤醒可续 | 全部权威状态在 `tokens`/`revisions` 两个 store；无缓存 Map。闹钟每 30 分钟清理；onStartup/onInstalled 也触发 |
 | SPA 换路由暂停绑定 | MAIN world 包裹 pushState/replaceState/popstate/hashchange → ISOLATED 监听自定义事件；`fullRoute` 变化即清空选择并显示暂停横幅，要求重新选择表单 |
 | 表单被替换暂停绑定 | `MutationObserver` 检测所选 form `!isConnected` → `paused-form`；字段集合变化则 `fieldsStale`，禁止保存/恢复直到重新勾选 |
-| 恢复时身份或类型变化就拒绝，不猜相近输入框 | `validateRestore` 逐字段比 key/kind/id/name，并比对整表指纹；失败时**一项都不写**，预览列出 missing / kind-changed / identity-changed / form-fingerprint-changed |
+| 恢复时身份或类型变化就拒绝，不猜相近输入框 | 单修订与多修订都在写入前重新抓实时 DOM，比对 key/kind/id/name、原控件对象、原 form 对象和整表指纹；失败时**一项都不写** |
+| 多修订冲突必须显式选择 | `batch.js` 对相同值自动合并；不同值要求选择具体 revisionId，计划记录来源；确认时重新鉴权并重取修订，当前值/路由/控件/form/授权任一变化即整组拒绝 |
 | 完成清理只删确认过的修订，期间新增保留 | `CONSUME_REVISION` 按 id + origin + route 定位，单条 `delete`；每次保存都是独立修订（append-only），互不影响 |
 | 不采集完整 DOM、不上传 | 扫描仅取候选控件的属性与被选字段的值；check.js 扫描确认扩展代码无 fetch/XHR/WebSocket/sendBeacon |
 
@@ -84,6 +85,14 @@ npm run serve     # 启动测试站点 http://127.0.0.1:8765/index.html
 - 在 profile 保存一份；改名再保存第二份（列表按时间倒序，各有独立尾号）；
 - 清空字段 → “恢复预览”：逐字段显示当前值→草稿值；不点勾选时“确认恢复”禁用；
 - 恢复后修改页面字段类型（DevTools 把 email 的 `type` 改成 password，或删除某字段）再预览：红色拒绝清单，且页面字段**完全没被改动**。
+
+### 3.1 多历史草稿合并恢复
+- 勾选同一 `form#profile` 的 2～8 份修订，点击“合并已选修订”；不同表单身份的草稿不可勾选；
+- 合并预览逐字段列出当前值与各来源值：各修订值相同会标记“同值”并可直接合并；值不同必须点选一个修订尾号，不会自动用最新草稿覆盖；
+- 取消勾选某个字段后确认：只有勾选字段恢复，未选字段保持原值，一次最多 20 个字段；
+- 确认前/确认后在 DevTools 修改任一已预览字段当前值、替换某个控件、替换整个 form，或切换路由：确认恢复必须整组拒绝，页面字段完全不变；
+- 在弹窗撤回授权或等待令牌失效后确认：后台重新鉴权失败，整组拒绝；只有重新授权后的新流程可恢复；
+- 只有实际提供了至少一个最终恢复字段（同值来源也计入）的修订，才会显示该修订的提交后清理按钮；未选字段所属修订与未采用的冲突来源保留，原“恢复预览 → 单修订恢复”流程仍可继续使用。
 
 ### 4. SPA 路由与表单替换（spa.html）
 - 授权并在 `form#contact` 保存草稿；
@@ -110,13 +119,14 @@ npm run serve     # 启动测试站点 http://127.0.0.1:8765/index.html
 
 ```bash
 $ npm test
-# tests 32
-# pass 32
+# tests 39
+# pass 39
 ```
 
 - `test/policy.test.js`（12）：准入/排除、指纹、恢复拒绝、信封约束、路由；
+- `test/batch.test.js`（6）：多修订同值合并、冲突显式选择、预览后上下文变化整组拒绝、清理来源；
 - `test/db.test.js`（10）：同事务作废旧令牌、组合校验、TTL、隔离、只删确认修订、SW 重启；
-- `test/sw.test.js`（10）：伪造 chrome 事件 API 跑真实 SW 源码，覆盖 GRANT 注入形状、iframe 拒绝、documentId 不匹配、SPA 路由桶、迟到保存、撤回推送、PRUNE 权限门。
+- `test/sw.test.js`（11）：伪造 chrome 事件 API 跑真实 SW 源码，覆盖 GRANT 注入形状、iframe 拒绝、documentId 不匹配、SPA 路由桶、迟到保存、撤回推送、过期授权、PRUNE 权限门。
 
 
 新增多修订合并恢复：面板选中同一当前表单的 2～8 个修订，最多合并 20 个可选字段。相同字段同值可合并，不同值必须由用户明确选择已选修订来源，不能自动以时间覆盖。确认预览保留当前值、字段种类、原控件及原表单对象、路由和授权令牌；确认后任一条件变化均拒绝整组写入。非选中字段不改，按成功恢复的具体修订进行后续清理。保留原单修订功能和安全字段策略。

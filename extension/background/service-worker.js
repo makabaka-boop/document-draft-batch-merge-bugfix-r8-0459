@@ -242,6 +242,7 @@ const HANDLERS = {
       ok: true,
       revision: {
         id: rec.id,
+        formId: rec.formId,
         formIdentity: rec.formIdentity,
         formFingerprint: rec.formFingerprint,
         fields: rec.fields.map((f) => ({

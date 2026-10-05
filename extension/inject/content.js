@@ -26,7 +26,8 @@
     selectedKeys: new Set(),
     fieldsStale: false,
     drafts: [],
-    preview: null, // {revision, current, validation}
+    preview: null, // 单修订预览：{revision, snapshot, validation, confirmed}
+    batchPreview: null, // 多修订预览：{revisions, snapshot, candidates, choices, confirmed}
     batchIds: new Set(),
     appliedRevisions: new Set(),
   };
@@ -132,6 +133,7 @@
     state.selectedKeys = new Set();
     state.fieldsStale = false;
     state.preview = null;
+    state.batchPreview = null;
   }
 
   async function regrant() {
@@ -242,6 +244,7 @@
     state.selectedKeys = new Set();
     state.fieldsStale = false;
     state.preview = null;
+    state.batchPreview = null;
     if (form) {
       state.analysis = P.analyze(descriptorsOf(form));
       state.status = "select-form";
@@ -382,6 +385,36 @@
     return refreshDrafts();
   }
 
+  // 在调用方持有的表单上实时抓取身份与“当前值”。计划中的 context/control
+  // 必须引用同一次页面生命周期里的对象，表单替换后不能只靠 id/name 猜新控件。
+  function captureFormSnapshot(form) {
+    if (!form || !form.isConnected || state.status !== "select-form")
+      throw batchError("form-detached", "当前文档未绑定有效表单");
+    const analysis = P.analyze(descriptorsOf(form));
+    const fp = P.fingerprint(analysis.eligible);
+    const fields = analysis.eligible.map((entry) => {
+      const control = controlOfKey(form, entry.key);
+      return {
+        key: entry.key,
+        id: entry.descriptor.id || null,
+        name: entry.descriptor.name || null,
+        kind: entry.kind,
+        label: entry.descriptor.labelText || entry.key.slice(1),
+        value: control ? control.value : "",
+        control,
+      };
+    });
+    return {
+      token: state.token,
+      route: P.fullRoute(location.href),
+      formId: form.id,
+      formIdentity: P.formIdentity(form.id, fp),
+      fingerprint: fp,
+      form,
+      fields,
+    };
+  }
+
   async function refreshDrafts() {
     if (!state.token) return;
     const res = await send({ type: "LIST_DRAFTS", token: state.token });
@@ -390,6 +423,9 @@
       return;
     }
     state.drafts = res.revisions || [];
+    for (const id of Array.from(state.batchIds)) {
+      if (!state.drafts.some((d) => d.id === id)) state.batchIds.delete(id);
+    }
     render();
   }
 
@@ -403,26 +439,20 @@
       flash("读取修订失败：" + res.error);
       return;
     }
-    const revision = res.revision;
 
-    // 不猜测：严格按保存的 key 在当前选中表单中找控件
-    const currentAnalyze = P.analyze(descriptorsOf(state.selectedForm));
-    const validation = P.validateRestore(
-      { formFingerprint: revision.formFingerprint, fields: revision.fields },
-      currentAnalyze,
-    );
-    const currentByKey = new Map();
-    for (const f of revision.fields) {
-      const control = controlOfKey(state.selectedForm, f.key);
-      const hit = currentAnalyze.eligible.find((e) => e.key === f.key);
-      currentByKey.set(f.key, {
-        control,
-        kind: hit ? hit.kind : null,
-        currentValue: control ? control.value : "",
-      });
+    let snapshot;
+    try {
+      snapshot = captureFormSnapshot(state.selectedForm);
+    } catch (e) {
+      flash("恢复预览被拒绝：" + e.message);
+      return;
     }
-    state.analysis = currentAnalyze;
-    state.preview = { revision, validation, currentByKey, confirmed: false };
+    const validation = P.validateRestore(
+      { formFingerprint: res.revision.formFingerprint, fields: res.revision.fields },
+      P.analyze(descriptorsOf(state.selectedForm)),
+    );
+    state.preview = { revision: res.revision, snapshot, validation, confirmed: false };
+    state.batchPreview = null;
     render();
   }
 
@@ -439,22 +469,43 @@
   async function applyRestore() {
     const pv = state.preview;
     if (!pv || !pv.validation.ok || !pv.confirmed) return;
-    // 全部通过校验后才统一写入，任一不过则完全不写
-    const targets = pv.revision.fields.map((f) => {
-      const cur = pv.currentByKey.get(f.key);
-      return { f, control: cur.control };
+
+    // 确认后仍由后台重新认证当前文档令牌并重取修订；过期/撤回/被顶掉/跨路由一律不能恢复。
+    const refreshed = await send({
+      type: "GET_REVISION",
+      token: pv.snapshot.token,
+      id: pv.revision.id,
     });
-    if (targets.some((t) => !t.control)) {
-      flash("存在找不到的字段，已拒绝");
+    if (!refreshed.ok) {
+      state.preview = null;
+      flash("授权或修订已失效，已整组拒绝且未改字段：" + refreshed.error);
+      render();
       return;
     }
-    for (const { f, control } of targets) {
-      setNativeValue(control, f.value);
+    const revision = refreshed.revision;
+
+    try {
+      const liveSnapshot = captureFormSnapshot(state.selectedForm);
+      const plan = FSPBatch.buildPlan(
+        [revision],
+        { keys: pv.revision.fields.map((f) => f.key) },
+        liveSnapshot,
+        { minRevisions: 1, maxRevisions: 1, maxFields: FSP.MAX_FIELDS },
+      );
+      FSPBatch.commitWithLiveSnapshot(
+        plan,
+        pv.snapshot,
+        liveSnapshot,
+        ({ control }, value) => setNativeValue(control, value),
+      );
+      state.appliedRevisions.add(revision.id);
+      flash("已恢复 " + plan.fields.length + " 个字段");
+      state.preview = null;
+      refreshDrafts();
+    } catch (e) {
+      flash("恢复被拒绝，未修改任何字段：" + e.message);
+      render();
     }
-    state.appliedRevisions.add(pv.revision.id);
-    flash("已恢复 " + targets.length + " 个字段");
-    state.preview = null;
-    refreshDrafts();
   }
 
   // 用页面环境自身的原生 setter 赋值并派发 input/change，兼容 React/Vue 受控组件
@@ -582,6 +633,11 @@
   .muted { color:#8c959f; }
   .confirm-line { display:flex; gap:7px; align-items:flex-start; margin:8px 0; }
   .count { color:#57606a; font-size:11px; }
+  .field-check { display:flex; gap:6px; align-items:flex-start; }
+  .sources { display:flex; flex-direction:column; gap:4px; }
+  .source-line { display:flex; gap:5px; align-items:flex-start; }
+  .source-line input { margin:2px 0 0; }
+  .same-dot { flex:0 0 auto; font-size:10px; color:#0a7a37; background:#dafbe1; border-radius:8px; padding:0 5px; }
   `;
 
   function h(tag, attrs, children) {
@@ -759,99 +815,266 @@
     return sec;
   }
 
-  function batchSnapshot() {
-    const form = state.selectedForm;
-    if (!form || !form.isConnected || state.status !== "select-form")
-      throw Error("当前文档未绑定表单");
-    const analysis = P.analyze(descriptorsOf(form)),
-      fingerprint = P.fingerprint(analysis.eligible);
-    return {
-      token: state.token,
-      route: P.fullRoute(location.href),
-      formId: form.id,
-      formIdentity: P.formIdentity(form.id, fingerprint),
-      fingerprint,
-      form,
-      fields: analysis.eligible.map((f) => {
-        const control = controlOfKey(form, f.key);
-        return { key: f.key, kind: f.kind, value: control.value, control };
-      }),
-    };
+  function batchError(code, message) {
+    const err = new Error(message || code);
+    err.code = code;
+    return err;
   }
-  async function openBatch() {
-    try {
-      const snapshot = batchSnapshot(),
-        ids = [...state.batchIds],
-        revisions = [];
-      for (const id of ids) {
-        const response = await send({
-          type: "GET_REVISION",
-          token: snapshot.token,
-          id,
-        });
-        if (!response.ok) throw Error(response.error);
-        revisions.push(response.revision);
-      }
-      const choices = {},
-        values = new Map();
-      for (const r of revisions)
-        for (const f of r.fields) {
-          const list = values.get(f.key) ?? [];
-          list.push({ id: r.id, value: f.value });
-          values.set(f.key, list);
-        }
-      for (const [key, list] of values)
-        if (new Set(list.map((x) => x.value)).size > 1) {
-          const choice = prompt(
-            "字段 " +
-              key +
-              " 有冲突，请输入采用的修订 ID：" +
-              JSON.stringify(list),
-          );
-          if (choice === null) return;
-          choices[key] = choice;
-        }
-      const plan = FSPBatch.buildPlan(revisions, choices, snapshot);
-      if (
-        !confirm(
-          "确认合并恢复这些字段？" +
-            JSON.stringify(
-              plan.fields.map((f) => ({
-                key: f.key,
-                source: f.sourceId,
-                before: f.before,
-                after: f.value,
-              })),
-            ),
+
+  function shortRevisionId(id) {
+    return String(id).slice(-6);
+  }
+
+  function revisionMatchesCurrent(d) {
+    if (!state.selectedForm || !state.analysis) return false;
+    return (
+      d.formId === state.selectedForm.id &&
+      d.formIdentity ===
+        P.formIdentity(
+          state.selectedForm.id,
+          P.fingerprint(state.analysis.eligible),
         )
-      )
-        return;
-      const auth = await send({
-        type: "LIST_DRAFTS",
-        token: plan.context.token,
-      });
-      if (!auth.ok) throw Error("授权已变化");
-      const events = [];
-      FSPBatch.commit(plan, batchSnapshot(), (field, value) => {
-        const prototype =
-          field.control.tagName === "TEXTAREA"
-            ? HTMLTextAreaElement.prototype
-            : HTMLInputElement.prototype;
-        Object.getOwnPropertyDescriptor(prototype, "value").set.call(
-          field.control,
-          value,
-        );
-        events.push(field.control);
-      });
-      for (const control of events) {
-        control.dispatchEvent(new Event("input", { bubbles: true }));
-        control.dispatchEvent(new Event("change", { bubbles: true }));
+    );
+  }
+
+  function buildBatchCandidates(revisions, snapshot) {
+    const byKey = new Map(snapshot.fields.map((f) => [f.key, f]));
+    const map = new Map();
+    const errors = [];
+    for (const rev of revisions) {
+      if (
+        rev.formIdentity !== snapshot.formIdentity ||
+        rev.formFingerprint !== snapshot.fingerprint ||
+        rev.formId !== snapshot.formId
+      ) {
+        errors.push({
+          key: "",
+          message: "修订 …" + shortRevisionId(rev.id) + " 不属于当前表单",
+        });
+        continue;
       }
-      for (const id of plan.revisions) state.appliedRevisions.add(id);
-      flash("已合并恢复 " + plan.fields.length + " 个字段");
+      for (const saved of rev.fields) {
+        const current = byKey.get(saved.key);
+        if (!current) {
+          errors.push({ key: saved.key, message: saved.key + " 已从当前表单消失" });
+          continue;
+        }
+        const validation = P.validateRestore(
+          { formFingerprint: rev.formFingerprint, fields: [saved] },
+          P.analyze(descriptorsOf(snapshot.form)),
+        );
+        if (!validation.ok) {
+          const reason = validation.mismatches
+            .filter((m) => m.key === saved.key)
+            .map((m) => m.reason)
+            .join(",");
+          errors.push({
+            key: saved.key,
+            message:
+              saved.key +
+              "（…" +
+              shortRevisionId(rev.id) +
+              "）" +
+              (reason || "身份不匹配"),
+          });
+          continue;
+        }
+        const candidate = map.get(saved.key) || {
+          key: saved.key,
+          label: current.label || saved.label || saved.key.slice(1),
+          kind: current.kind,
+          before: current.value,
+          sources: [],
+        };
+        candidate.sources.push({
+          revisionId: rev.id,
+          value: saved.value,
+          label: saved.label,
+        });
+        map.set(saved.key, candidate);
+      }
+    }
+
+    const candidates = [];
+    for (const field of snapshot.fields) {
+      const candidate = map.get(field.key);
+      if (!candidate) continue;
+      candidate.conflict =
+        new Set(candidate.sources.map((s) => s.value)).size > 1;
+      candidates.push(candidate);
+    }
+    return { candidates, errors };
+  }
+
+  function batchReady(pv) {
+    if (!pv) return false;
+    const selected = pv.candidates.filter((c) => pv.checked.has(c.key));
+    return (
+      selected.length > 0 &&
+      selected.length <= FSPBatch.MAX_FIELDS &&
+      pv.errors.length === 0 &&
+      selected.every((c) => {
+        if (!c.conflict) return true;
+        const choice = pv.choices[c.key];
+        return c.sources.some((s) => s.revisionId === choice);
+      })
+    );
+  }
+
+  async function openBatch() {
+    const ids = Array.from(state.batchIds);
+    if (ids.length < FSPBatch.MIN_REVISIONS || ids.length > FSPBatch.MAX_REVISIONS) {
+      flash("请选择 2～8 个同一当前表单的历史修订");
+      return;
+    }
+    if (!state.selectedForm) {
+      flash("请先选择要恢复到的当前表单");
+      return;
+    }
+
+    let snapshot;
+    try {
+      snapshot = captureFormSnapshot(state.selectedForm);
+    } catch (e) {
+      flash("合并预览被拒绝：" + e.message);
+      return;
+    }
+
+    const revisions = [];
+    for (const id of ids) {
+      const response = await send({
+        type: "GET_REVISION",
+        token: snapshot.token,
+        id,
+      });
+      if (!response.ok) {
+        flash("读取修订失败，已停止且未改字段：" + response.error);
+        return;
+      }
+      revisions.push(response.revision);
+    }
+
+    const { candidates, errors } = buildBatchCandidates(revisions, snapshot);
+    const checked = new Set(
+      candidates
+        .filter((c) => !c.conflict && candidates.length <= FSPBatch.MAX_FIELDS)
+        .map((c) => c.key),
+    );
+    state.batchPreview = {
+      revisions,
+      snapshot,
+      candidates,
+      errors,
+      choices: {},
+      checked,
+      confirmed: false,
+    };
+    state.preview = null;
+    render();
+  }
+
+  function closeBatchPreview() {
+    state.batchPreview = null;
+    render();
+  }
+
+  function setBatchField(key, checked) {
+    const pv = state.batchPreview;
+    if (!pv) return;
+    if (checked) {
+      if (pv.checked.size >= FSPBatch.MAX_FIELDS && !pv.checked.has(key)) {
+        flash("一次最多合并 " + FSPBatch.MAX_FIELDS + " 个字段");
+        return;
+      }
+      pv.checked.add(key);
+    } else {
+      pv.checked.delete(key);
+    }
+    pv.confirmed = false;
+    render();
+  }
+
+  function setBatchChoice(key, revisionId) {
+    const pv = state.batchPreview;
+    if (!pv) return;
+    pv.choices[key] = revisionId;
+    pv.checked.add(key);
+    pv.confirmed = false;
+    render();
+  }
+
+  async function applyBatchRestore() {
+    const preview = state.batchPreview;
+    if (!preview || !batchReady(preview) || !preview.confirmed) return;
+
+    // 确认瞬间重新取数：任何 GET 失败（过期授权、撤回、跨路由、修订被删）
+    // 都整组拒绝。
+    const freshRevisions = [];
+    for (const id of preview.revisions.map((r) => r.id)) {
+      const response = await send({
+        type: "GET_REVISION",
+        token: preview.snapshot.token,
+        id,
+      });
+      if (!response.ok) {
+        state.batchPreview = null;
+        flash("授权或修订已失效，整组拒绝且未改字段：" + response.error);
+        render();
+        return;
+      }
+      freshRevisions.push(response.revision);
+    }
+
+    try {
+      const liveSnapshot = captureFormSnapshot(state.selectedForm);
+      const keys = Array.from(preview.checked);
+      const plan = FSPBatch.buildPlan(
+        freshRevisions,
+        { keys, choices: preview.choices },
+        liveSnapshot,
+        {
+          minRevisions: FSPBatch.MIN_REVISIONS,
+          maxRevisions: FSPBatch.MAX_REVISIONS,
+          maxFields: FSPBatch.MAX_FIELDS,
+        },
+      );
+
+      // 再次要求用户在预览中选择的来源仍与最新修订完全一致。
+      for (const planned of plan.fields) {
+        const candidate = preview.candidates.find((c) => c.key === planned.key);
+        if (!candidate) throw batchError("field-missing", "预览字段已失效");
+        if (planned.sourceId !== preview.choices[planned.key] && candidate.conflict)
+          throw batchError("choice-changed", "冲突字段来源已变化");
+        const freshSource = freshRevisions
+          .find((r) => r.id === planned.sourceId)
+          ?.fields.find((f) => f.key === planned.key);
+        const previewSource = preview.revisions
+          .find((r) => r.id === planned.sourceId)
+          ?.fields.find((f) => f.key === planned.key);
+        if (
+          !freshSource ||
+          !previewSource ||
+          freshSource.value !== previewSource.value ||
+          freshSource.kind !== previewSource.kind
+        ) {
+          throw batchError("revision-changed", "已选修订来源已变化");
+        }
+      }
+
+      const result = FSPBatch.commitWithLiveSnapshot(
+        plan,
+        preview.snapshot,
+        liveSnapshot,
+        ({ control }, value) => setNativeValue(control, value),
+      );
+      // 只有实际提供了至少一个已恢复字段的修订，才进入提交后的手动清理。
+      for (const id of result.appliedRevisionIds) state.appliedRevisions.add(id);
+      flash("已合并恢复 " + result.fieldCount + " 个字段；未选字段保持原值");
+      state.batchPreview = null;
       refreshDrafts();
     } catch (e) {
-      flash("合并恢复被拒绝：" + e.message);
+      flash("合并恢复被整组拒绝，未修改任何字段：" + e.message);
+      render();
     }
   }
   function renderDraftsSection() {
@@ -869,17 +1092,32 @@
       );
       return sec;
     }
+    const count = state.batchIds.size;
+    const canBatch =
+      count >= FSPBatch.MIN_REVISIONS && count <= FSPBatch.MAX_REVISIONS;
     sec.appendChild(
-      h("button", { class: "btn", text: "合并已选修订", onClick: openBatch }),
+      h(
+        "button",
+        {
+          class: "btn",
+          disabled: !canBatch,
+          onClick: openBatch,
+          text:
+            "合并已选修订（" +
+            count +
+            "/" +
+            FSPBatch.MAX_REVISIONS +
+            "，仅当前表单）",
+        },
+      ),
     );
+    if (count > FSPBatch.MAX_REVISIONS) {
+      sec.appendChild(
+        h("div", { class: "ex", text: "一次最多选择 8 个历史修订。" }),
+      );
+    }
     for (const d of state.drafts) {
-      const sameForm =
-        state.selectedForm &&
-        d.formIdentity ===
-          P.formIdentity(
-            state.selectedForm.id,
-            P.fingerprint((state.analysis || { eligible: [] }).eligible),
-          );
+      const sameForm = revisionMatchesCurrent(d);
       const card = h("div", { class: "draft" }, [
         h("div", { class: "top" }, [
           h("div", null, [
@@ -905,9 +1143,14 @@
         h("input", {
           type: "checkbox",
           checked: state.batchIds.has(d.id),
+          disabled: !sameForm ||
+            (!state.batchIds.has(d.id) &&
+              state.batchIds.size >= FSPBatch.MAX_REVISIONS),
+          title: sameForm ? "纳入合并候选" : "只能合并当前表单身份完全一致的修订",
           onChange: (e) => {
             if (e.target.checked) state.batchIds.add(d.id);
             else state.batchIds.delete(d.id);
+            render();
           },
         }),
       );
@@ -992,7 +1235,7 @@
       ]),
     );
     for (const f of pv.revision.fields) {
-      const cur = pv.currentByKey.get(f.key);
+      const cur = pv.snapshot.fields.find((x) => x.key === f.key);
       const tr = h("tr", null, [
         h(
           "td",
@@ -1005,7 +1248,7 @@
         h("td", null, [
           h("div", {
             class: "muted",
-            text: cur.currentValue === "" ? "（空）" : cur.currentValue,
+            text: cur.value === "" ? "（空）" : cur.value,
           }),
           h("div", {
             text: "↓ " + (f.value === "" ? "（清空为空）" : f.value),
@@ -1049,6 +1292,184 @@
     return ov;
   }
 
+  function renderBatchOverlay() {
+    const pv = state.batchPreview;
+    const ov = h("div", { class: "overlay" }, [
+      h("div", { class: "ov-hd" }, [
+        h("span", { text: "3. 多修订合并预览与确认" }),
+        h("button", {
+          class: "btn",
+          style: "width:auto;margin:0",
+          onClick: closeBatchPreview,
+          text: "✕",
+        }),
+      ]),
+      h("div", { class: "ov-bd" }),
+    ]);
+    const bd = ov.querySelector(".ov-bd");
+
+    bd.appendChild(
+      h("div", {
+        class: "banner b-info",
+        text:
+          "相同值自动合并；不同值必须在下方明确选择一个修订来源。未勾选字段保持当前值。",
+      }),
+    );
+
+    if (pv.errors.length) {
+      bd.appendChild(
+        h("div", {
+          class: "banner b-err",
+          text: "当前表单、字段类型或控件身份与预览条件不一致：整组不能恢复，且不会写入。",
+        }),
+      );
+      for (const error of pv.errors) {
+        bd.appendChild(h("div", { class: "mismatch", text: "· " + error.message }));
+      }
+      bd.appendChild(
+        h("button", { class: "btn", onClick: closeBatchPreview, text: "返回" }),
+      );
+      return ov;
+    }
+
+    if (!pv.candidates.length) {
+      bd.appendChild(
+        h("div", { class: "banner b-err", text: "这些修订没有可用于当前表单的字段。" }),
+      );
+      bd.appendChild(
+        h("button", { class: "btn", onClick: closeBatchPreview, text: "返回" }),
+      );
+      return ov;
+    }
+
+    const table = h(
+      "table",
+      null,
+      h("tr", null, [
+        h("td", { class: "k", text: "恢复 / 字段 / 当前值" }),
+        h("td", { text: "候选修订值（必须显式选择冲突来源）" }),
+      ]),
+    );
+
+    for (const candidate of pv.candidates) {
+      const fieldCb = h("input", {
+        type: "checkbox",
+        onChange: (e) => setBatchField(candidate.key, e.target.checked),
+      });
+      fieldCb.checked = pv.checked.has(candidate.key);
+
+      const sourceBox = h("div", { class: "sources" });
+      for (const source of candidate.sources) {
+        const line = h("label", { class: "source-line" });
+        if (candidate.conflict) {
+          const radio = h("input", {
+            type: "radio",
+            name: "batch-source-" + candidate.key,
+            onChange: () => setBatchChoice(candidate.key, source.revisionId),
+          });
+          radio.checked = pv.choices[candidate.key] === source.revisionId;
+          line.appendChild(radio);
+        } else {
+          line.appendChild(h("span", { class: "same-dot", text: "同值" }));
+        }
+        line.appendChild(
+          h(
+            "span",
+            null,
+            "…" + shortRevisionId(source.revisionId) + "：" +
+              (source.value === "" ? "（清空为空）" : source.value),
+          ),
+        );
+        sourceBox.appendChild(line);
+      }
+
+      table.appendChild(
+        h("tr", null, [
+          h("td", { class: "k" }, [
+            h("div", { class: "field-check" }, [
+              fieldCb,
+              h("div", null, [
+                h("div", { text: candidate.label }),
+                h("div", {
+                  class: "muted",
+                  text:
+                    candidate.key +
+                    " · " +
+                    candidate.kind +
+                    " · 当前：" +
+                    (candidate.before === "" ? "（空）" : candidate.before),
+                }),
+              ]),
+            ]),
+          ]),
+          h("td", null, [sourceBox]),
+        ]),
+      );
+    }
+    bd.appendChild(table);
+
+    const selectedCount = pv.checked.size;
+    if (selectedCount > FSPBatch.MAX_FIELDS) {
+      bd.appendChild(
+        h("div", {
+          class: "mismatch",
+          text: "最多只能恢复 " + FSPBatch.MAX_FIELDS + " 个字段，请取消部分勾选。",
+        }),
+      );
+    }
+    const missingChoices = pv.candidates
+      .filter((c) => pv.checked.has(c.key) && c.conflict)
+      .filter((c) => !c.sources.some((s) => s.revisionId === pv.choices[c.key]));
+    if (missingChoices.length) {
+      bd.appendChild(
+        h("div", {
+          class: "mismatch",
+          text:
+            "还有 " +
+            missingChoices.length +
+            " 个冲突字段未选择修订来源；系统不会自动采用最新草稿。",
+        }),
+      );
+    }
+
+    const cb = h("input", {
+      type: "checkbox",
+      onChange: (e) => {
+        pv.confirmed = e.target.checked;
+        render();
+      },
+    });
+    cb.checked = pv.confirmed;
+    bd.appendChild(
+      h("label", { class: "confirm-line" }, [
+        cb,
+        h("span", {
+          text:
+            "我确认按上方明确选择的来源合并恢复 " +
+            selectedCount +
+            " 个字段；其它字段不改。",
+        }),
+      ]),
+    );
+    bd.appendChild(
+      h("button", {
+        class: "btn primary",
+        disabled: !pv.confirmed || !batchReady(pv),
+        onClick: applyBatchRestore,
+        text: "确认合并恢复",
+      }),
+    );
+    bd.appendChild(
+      h("div", {
+        class: "muted",
+        style: "margin-top:8px",
+        text:
+          "确认时会重新验证授权、完整路由、原表单对象、原控件、字段类型和预览当前值；任一失效都整组拒绝。",
+      }),
+    );
+    return ov;
+  }
+
   function render() {
     if (!root) return;
     const panel = root.getElementById("panel");
@@ -1078,6 +1499,7 @@
       bd.appendChild(renderDraftsSection());
     }
     if (state.preview) panel.appendChild(renderPreviewOverlay());
+    if (state.batchPreview) panel.appendChild(renderBatchOverlay());
   }
 
   window.__fspFsm = { regrant, handshake };
