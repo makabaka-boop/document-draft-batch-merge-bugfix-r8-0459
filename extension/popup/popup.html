@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>表单字段暂存</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <strong>表单字段暂存</strong>
+    <span class="local">纯本地 · 无后端</span>
+  </header>
+
+  <section class="route">
+    <div id="url" class="url">读取当前页中…</div>
+    <div id="state" class="state"></div>
+  </section>
+
+  <div id="unsupported" class="banner error hidden">
+    当前页面不支持注入（chrome://、扩展页、file:// 等）。请在普通 http(s) 页面点击扩展。
+  </div>
+
+  <div class="actions">
+    <button id="grant" class="primary">授权并注入当前页（顶层文档）</button>
+    <button id="revoke" class="hidden">撤回本页授权</button>
+  </div>
+
+  <details id="testbox">
+    <summary>测试工具（过期清理 / 重启验证）</summary>
+    <p class="hint">不采集 DOM、不上传任何内容；所有数据仅存在本地 IndexedDB。</p>
+    <button id="prune">立即运行过期清理（默认 TTL：令牌 12h / 修订 7 天）</button>
+    <label class="testmode"><input type="checkbox" id="testMode"> 测试模式：把 TTL 视为 0（仅清已过期记录，手动验证用）</label>
+    <div id="testout" class="testout"></div>
+    <div id="counts" class="counts"></div>
+  </details>
+
+  <footer>
+    权限仅 <code>activeTab</code> + <code>scripting</code>；无通配站点权限，不读取 iframe。
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

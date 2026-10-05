@@ -1,0 +1,12 @@
+{
+  "name": "form-save-local-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "无后端的 Chrome MV3 扩展：手动保存/恢复选中表单字段（仅 activeTab，本地 IndexedDB）",
+  "scripts": {
+    "test": "node --test test/",
+    "serve": "node tools/serve.js",
+    "icons": "node tools/make-icons.js",
+    "check": "node tools/check.js"
+  }
+}

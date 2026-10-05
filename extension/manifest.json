@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "表单字段暂存（纯本地）",
+  "version": "1.0.0",
+  "minimum_chrome_version": "106",
+  "description": "无后端、无通配站点权限：仅在你点击授权当前页后注入顶层文档，手动保存/恢复选中的普通文本字段。",
+  "permissions": ["activeTab", "scripting", "alarms"],
+  "host_permissions": [],
+  "action": {
+    "default_title": "表单字段暂存",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "classic"
+  }
+}

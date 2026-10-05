@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>导航 / bfcache / 旧令牌 · 表单暂存扩展</title>
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/index.html">多表单页</a>
+  <a href="/spa.html">SPA 路由页</a>
+  <a href="/navigate.html" class="active">导航 / bfcache 页</a>
+</nav>
+
+<h1>整页导航、bfcache、迟到保存</h1>
+<p class="note">带 <code>?fsp_test=1</code> 打开本页可启用测试钩子（见下方控制台按钮）。</p>
+
+<form id="memo" class="card" onsubmit="event.preventDefault(); document.getElementById('memo-out').textContent='提交于 ' + new Date().toLocaleTimeString();">
+  <h2>form#memo</h2>
+  <label>事项<input id="memo-title" type="text"></label>
+  <label>内容<textarea id="memo-body" rows="3"></textarea></label>
+  <button type="submit">提交</button>
+  <output id="memo-out"></output>
+</form>
+
+<div class="card">
+  <h2>导航测试</h2>
+  <p><a href="/index.html" id="away">去多表单页（再用浏览器后退，验证 bfcache 恢复时重新握手）</a></p>
+  <button onclick="location.replace('/index.html')">location.replace 离开</button>
+  <button onclick="location.reload()">整页重载（旧内容脚本销毁，旧令牌失效）</button>
+</div>
+
+<div class="card" id="test-card">
+  <h2>测试钩子（仅 fsp_test 参数下出现）</h2>
+  <p class="note">流程：授权 → 填字段并保存草稿 → 再次点扩展图标“重新授权”（旧令牌被顶掉）→ 点下面按钮用旧令牌迟到保存，预期被拒绝。</p>
+  <button onclick="staleSave()">用上一个（被顶掉的）令牌尝试迟到保存</button>
+  <button onclick="queryState()">查询内容脚本状态</button>
+  <pre id="test-result">（结果会显示在这里）</pre>
+</div>
+
+<script src="harness.js"></script>
+<script>
+if (!new URLSearchParams(location.search).has('fsp_test')) {
+  document.getElementById('test-card').remove();
+} else {
+  window.addEventListener('message', (e) => {
+    if (e.source !== window || !e.data || !e.data.__fspTestResult) return;
+    document.getElementById('test-result').textContent = JSON.stringify(e.data.res, null, 2);
+  });
+}
+function staleSave() {
+  window.postMessage({ __fspTest: true, action: 'stale-save' }, location.origin);
+}
+function queryState() {
+  window.postMessage({ __fspTest: true, action: 'state' }, location.origin);
+}
+</script>
+</body>
+</html>

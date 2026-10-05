@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>测试表单 A/B · 表单暂存扩展</title>
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/index.html">多表单页</a>
+  <a href="/spa.html">SPA 路由页</a>
+  <a href="/navigate.html">导航 / bfcache 页</a>
+</nav>
+
+<h1>多表单测试页</h1>
+<p class="note">本页覆盖：唯一 id 表单、name-only 字段、password/file/hidden/OTP/支付排除、重复 id/name 排除、无 id 表单排除。</p>
+
+<form id="profile" class="card" onsubmit="event.preventDefault(); showSubmitted('profile');">
+  <h2>form#profile（可保存）</h2>
+  <label>姓名（id 唯一）<input id="fullname" name="fullname" type="text" autocomplete="name"></label>
+  <label>用户名（autocomplete=username，可保存）<input id="username" name="username" type="text" autocomplete="username"></label>
+  <label>邮箱<input id="email" name="email" type="email"></label>
+  <label>手机<input id="phone" name="phone" type="tel"></label>
+  <label>年龄<input id="age" name="age" type="number"></label>
+  <label>个人简介<textarea id="bio" name="bio" rows="2"></textarea></label>
+
+  <fieldset>
+    <legend>以下必须始终被排除</legend>
+    <label>密码<input id="pw" name="pw" type="password" autocomplete="new-password"></label>
+    <label>文件<input id="avatar" name="avatar" type="file"></label>
+    <input id="csrf" name="csrf" type="hidden" value="abc123">
+    <label>一次性验证码(autocomplete)<input id="otp" name="otp" type="text" autocomplete="one-time-code" inputmode="numeric"></label>
+    <label>短信验证码(名称命中)<input id="smsCode" name="sms_code" type="text"></label>
+    <label>卡号(autocomplete=cc-number)<input id="card" name="card" type="text" autocomplete="cc-number"></label>
+    <label>CVV<input id="cvv" name="cvv" type="text" autocomplete="cc-csc"></label>
+    <label>持卡人(autocomplete=cc-name)<input id="ccname" name="ccname" type="text" autocomplete="cc-name"></label>
+    <label>禁用字段<input id="disabledf" name="disabledf" type="text" disabled value="x"></label>
+    <label>只读字段<input id="readonlyf" name="readonlyf" type="text" readonly value="y"></label>
+    <label>checkbox（非普通文本）<input id="agree" name="agree" type="checkbox"></label>
+  </fieldset>
+  <button type="submit">提交 profile（仅阻止默认动作）</button>
+  <output id="profile-out"></output>
+</form>
+
+<form id="settings" class="card" onsubmit="event.preventDefault(); showSubmitted('settings');">
+  <h2>form#settings（name-only 字段）</h2>
+  <label>偏好备注（无 id、name 唯一）<input name="preference_note" type="text"></label>
+  <label>签名（无 id、name 唯一）<textarea name="signature_text" rows="2"></textarea>
+  <fieldset>
+    <legend>无 id 且 name 重复 → 排除</legend>
+    <label>重复 name 1<input name="dup_group" type="text"></label>
+    <label>重复 name 2<input name="dup_group" type="text"></label>
+  </fieldset>
+  <button type="submit">提交 settings</button>
+  <output id="settings-out"></output>
+</form>
+
+<form class="card" onsubmit="event.preventDefault();">
+  <h2>无 id 的表单（不应出现在选择列表）</h2>
+  <label>随便<input name="noidfield" type="text"></label>
+</form>
+
+<form id="profile" class="card broken" onsubmit="event.preventDefault();">
+  <h2>第二个 id="profile"（重复 id 表单 → 整个排除）</h2>
+  <label>不应可选<input id="rogue" type="text"></label>
+</form>
+
+<script src="harness.js"></script>
+<script>
+function showSubmitted(id) {
+  document.getElementById(id + '-out').textContent = '已在 ' + new Date().toLocaleTimeString() + ' 模拟提交';
+}
+</script>
+</body>
+</html>

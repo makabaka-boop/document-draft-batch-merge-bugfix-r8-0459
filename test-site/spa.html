@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPA 路由 / 表单替换 · 表单暂存扩展</title>
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav class="topnav">
+  <a href="/index.html">多表单页</a>
+  <a href="/spa.html" class="active">SPA 路由页</a>
+  <a href="/navigate.html">导航 / bfcache 页</a>
+</nav>
+
+<h1>SPA 路由与表单替换</h1>
+<p class="note">history.pushState / replaceState 换路由（含 hash）应暂停绑定、要求重新选择；按钮可原地替换表单节点。</p>
+
+<div class="card">
+  <button onclick="go('/spa.html#/view/contact')">pushState → #/view/contact</button>
+  <button onclick="go('/spa.html?tab=billing')">pushState → ?tab=billing</button>
+  <button onclick="go('/spa.html')">pushState → 无 hash/search</button>
+  <span id="route-display" class="state-tag"></span>
+</div>
+
+<div id="stage" class="card">
+  <!-- 表单在此挂载 -->
+</div>
+
+<div class="card">
+  <button onclick="replaceForm('contact')">原地替换表单（同 id，内容变了）</button>
+  <button onclick="replaceForm('contact2')">替换成另一个 id 的表单</button>
+  <button onclick="removeForm()">移除表单</button>
+</div>
+
+<script src="harness.js"></script>
+<script>
+const stage = document.getElementById('stage');
+function showRoute() {
+  document.getElementById('route-display').textContent = '当前 route: ' + location.pathname + location.search + location.hash;
+}
+function go(url) {
+  history.pushState({}, '', url);
+  showRoute();
+  render(location.hash.includes('contact') ? 'contact' : 'billing');
+}
+window.addEventListener('popstate', () => { showRoute(); render('contact'); });
+
+function render(kind) {
+  stage.innerHTML = '';
+  if (kind === 'contact2') {
+    stage.innerHTML = '<form id="contact-v2"><h2>form#contact-v2</h2>' +
+      field('v2-subject', '主题') + field('v2-body', '内容') + '</form>';
+  } else {
+    stage.innerHTML = '<form id="contact">' +
+      '<h2>form#contact（' + (kind === 'billing' ? 'billing 版本，字段不同' : 'contact 版本') + '）</h2>' +
+      (kind === 'billing'
+        ? field('invoice-title', '发票抬头') + field('invoice-tax', '税号')
+        : field('contact-name', '联系人') + field('contact-address', '地址') + field('contact-note', '备注', true)) +
+      '</form>';
+  }
+}
+function replaceForm(kind) { render(kind); }
+function removeForm() { stage.innerHTML = '<p class="note">表单已移除。</p>'; }
+function field(id, label, area) {
+  return '<label>' + label + ' <' + (area ? 'textarea id="' + id + '" rows="2"' : 'input id="' + id + '" type="text"') +
+    (area ? '></textarea>' : '>') + '</label>';
+}
+showRoute();
+render('contact');
+</script>
+</body>
+</html>
