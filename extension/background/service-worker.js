@@ -228,6 +228,17 @@ const HANDLERS = {
     return { ok: true, route: auth.ctx.route, revisions: rows };
   },
 
+  // 合并恢复确认前的授权复核：过期 / 撤回 / 被重新授权顶掉的令牌不能恢复
+  async VERIFY_TOKEN(msg, sender) {
+    const auth = await authenticate(sender, msg.token);
+    if (!auth.ok) return auth;
+    return {
+      ok: true,
+      route: auth.ctx.route,
+      expiresAt: auth.tokenRecord.expiresAt,
+    };
+  },
+
   // 恢复前取完整修订（预览数据来源）
   async GET_REVISION(msg, sender) {
     const auth = await authenticate(sender, msg.token);
@@ -242,6 +253,7 @@ const HANDLERS = {
       ok: true,
       revision: {
         id: rec.id,
+        formId: rec.formId,
         formIdentity: rec.formIdentity,
         formFingerprint: rec.formFingerprint,
         fields: rec.fields.map((f) => ({

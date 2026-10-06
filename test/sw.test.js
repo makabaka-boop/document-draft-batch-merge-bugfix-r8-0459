@@ -359,6 +359,61 @@ test("内容脚本伪造弹窗身份无效：PRUNE_NOW 仅接受弹窗；TTL=0 �
   assert.equal((await dispatch({ type: "PRUNE_NOW" })).ok, true);
 });
 
+test("VERIFY_TOKEN：合并恢复确认前的授权复核；过期/撤回/被顶掉的令牌不能恢复", async () => {
+  const h = await dispatch({ type: "HELLO" }, pageSender());
+  const token = h.token;
+
+  const ok = await dispatch({ type: "VERIFY_TOKEN", token }, pageSender());
+  assert.equal(ok.ok, true);
+  assert.equal(ok.route, currentTab.url);
+  assert.ok(ok.expiresAt > Date.now());
+
+  // 伪造/未知令牌
+  assert.equal(
+    (
+      await dispatch(
+        { type: "VERIFY_TOKEN", token: "x".repeat(64) },
+        pageSender(),
+      )
+    ).error,
+    "unknown-token",
+  );
+
+  // 重新授权顶掉旧令牌
+  const h2 = await dispatch({ type: "HELLO" }, pageSender());
+  const stale = await dispatch(
+    { type: "VERIFY_TOKEN", token },
+    pageSender(),
+  );
+  assert.equal(stale.ok, false);
+  assert.equal(stale.error, "superseded-token");
+  assert.equal(
+    (await dispatch({ type: "VERIFY_TOKEN", token: h2.token }, pageSender()))
+      .ok,
+    true,
+  );
+
+  // 撤回后
+  await dispatch({ type: "REVOKE" });
+  const revoked = await dispatch(
+    { type: "VERIFY_TOKEN", token: h2.token },
+    pageSender(),
+  );
+  assert.equal(revoked.ok, false);
+  assert.equal(revoked.error, "revoked-token");
+});
+
+test("VERIFY_TOKEN：过期令牌不能恢复（TTL 到点即拒）", async () => {
+  const h = await dispatch({ type: "HELLO" }, pageSender());
+  await DB.pruneExpired(h.expiresAt + 1); // 使令牌在库中标记为 expired
+  const res = await dispatch(
+    { type: "VERIFY_TOKEN", token: h.token },
+    pageSender(),
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "expired-token");
+});
+
 test("载荷约束在 SW 层强制执行（20 项上限、password kind、超长值）", async () => {
   const h = await dispatch(
     { type: "HELLO" },
